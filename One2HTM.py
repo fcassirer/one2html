@@ -1,4 +1,5 @@
 ##One2HTM Copyright 2011 Eirinn Mackay
+##        Updated June 2013 Fred Cassirer to support sectionGroups and attachments, lose the GUI
 
 ##This program is free software: you can redistribute it and/or modify
 ##it under the terms of the GNU General Public License as published by
@@ -13,8 +14,6 @@
 ##You should have received a copy of the GNU General Public License
 ##along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import wx 
-import myIcon #pythonified PNG file containing this program's icon
 import email.parser
 import win32com.client
 import xml.etree.ElementTree as ET
@@ -23,10 +22,11 @@ import pickle
 import tempfile
 import re
 import ConfigParser
+import shutil
 from time import sleep
 from operator import itemgetter
 
-from pprint import pprint
+ignored_headings = ['OneNote_RecycleBin','New Section','Deleted Pages']
 
 onapp = win32com.client.Dispatch( 'OneNote.Application')
 
@@ -35,8 +35,8 @@ onapp = win32com.client.Dispatch( 'OneNote.Application')
 #CSS style for index pages
 commonheader="""<html><head><meta name="viewport" content="width = device-width"><style>
 body { font-family:Calibri; margin:0px; padding:8px;}
-div {padding: 4px; line-height: 24pt; max-width: 1000; border-top: solid grey thin; font-size: large;}
-div.subpage { margin-left: 30px; max-width: 970px; font-size:medium;}
+div {padding: 4px; line-height: 24pt; max-width: 900px; border-top: solid grey thin; font-size: large;}
+div.subpage { margin-left: 30px; max-width: 870px; font-size:medium;}
 a { text-decoration: none; color: black;}
 a:hover{ text-decoration: underline overline;}
 a.divlink {display:block;}
@@ -62,6 +62,8 @@ class IndexMaker: #root class, never instantiated
             self.completed=True
         return self.html
     def writeFile(self, fullpath):
+        folder=os.path.dirname(fullpath)
+        if not os.path.isdir(folder): os.makedirs(folder)
         fs=open(fullpath, 'w')
         fs.write(self.getHTML().encode('utf-8'))
         fs.close()
@@ -75,68 +77,18 @@ class NotebookIndex(IndexMaker):
     def __init__(self, attribDict):
         self.firstline=u'<title>{name}</title></head><body><h1>{name}</h1>'.format(**attribDict)
         self.firstline+self.firstline+u'<breadcrumb><a href="../index.htm">&lArr; back to notebook list</a></breadcrumb>'
-        self.linetemplate=u'<div style="background: {color}"><a class="divlink" href="{subPath}">{subPath}</a></div>\n'
-        self.start()
-class SectionGroupIndex(IndexMaker):
-    def __init__(self, attribDict):
-        self.firstline=u'<title>{name}</title></head><body style="border-left: solid {color} 10px;"><h1>{name}</h1>'.format(**attribDict)
-        self.firstline+self.firstline+u'<breadcrumb><a href="index.htm">&lArr; back to section list</a></breadcrumb>'
-        self.linetemplate=u'<div {subpageString}><a class="divlink" href={permanentID}/index.htm>{name}</a></div>'
+        self.linetemplate=u'<div style="background: {color}"><a class="divlink" href="{name}.htm">{group}{name}</a></div>\n'
         self.start()
 class SectionIndex(IndexMaker):
     def __init__(self, attribDict):
-        self.firstline=u'<title>{name}</title></head><body style="border-left: solid {color} 10px;"><h1>{name}</h1>'.format(**attribDict)
+        self.firstline=u'<title>{name}</title></head><body style="border-left: solid {color} 10px;"><h1>{group}{name}</h1>'.format(**attribDict)
         self.firstline+self.firstline+u'<breadcrumb><a href="index.htm">&lArr; back to section list</a></breadcrumb>'
-        self.linetemplate=u'<div {subpageString}><a class="divlink" href=pages/{permanentID}/index.htm>{name}</a></div>'
+        self.linetemplate=u'<div {subpageString}><a class="divlink" href={permanentID}/index.htm>{name}</a></div>'
         self.start()
 
 ### end of HTML routines ###
 
-### GUI stuff ###
-
-class TaskBarIcon(wx.TaskBarIcon):
-    def __init__(self, parent):
-        super(TaskBarIcon, self).__init__()
-        self.SetIcon(myIcon.getOneNoteIcon(), 'OneNote HTML Server')
-        self.Bind(wx.EVT_TASKBAR_LEFT_DOWN, self.show_window)
-        self.parent=parent
-    def create_menu_item(self, menu, label, func):
-        item = wx.MenuItem(menu, wx.ID_ANY, label)
-        menu.Bind(wx.EVT_MENU, func, id=item.GetId())
-        menu.AppendItem(item)
-        return item
-    def CreatePopupMenu(self):
-        menu = wx.Menu()
-        self.create_menu_item(menu, 'Show Window', self.show_window)
-        self.create_menu_item(menu, 'Exit', self.on_exit)
-        return menu
-    def show_window(self, event):
-        self.parent.unMinimize()
-    def on_exit(self, event):
-        self.parent.Close(True)
-
-class MainWindow(wx.Frame):
-    def __init__(self,parent,title):
-        wx.Frame.__init__(self, parent, title=title, size=(500,300))
-        self.SetIcon(myIcon.getOneNoteIcon())
-        self.memo = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        self.CreateStatusBar()
-        self.taskicon=TaskBarIcon(self)
-        self.timer=wx.Timer(self)
-        self.Bind(wx.EVT_CLOSE, self.onCloseWindow)
-        self.Bind(wx.EVT_ICONIZE, self.onMinimize)
-        self.Show(True)
-    def onCloseWindow(self, event):
-        self.taskicon.Destroy()
-        self.Destroy()
-    def onMinimize(self, event):
-        self.Hide()
-    def unMinimize(self):
-        self.Show()
-        self.Iconize(False)
-        
-### end of GUI stuff ###
-    
+   
 class One2HTM:
     def __init__(self, master):
         self.master=master #master refers to the main window
@@ -151,11 +103,14 @@ class One2HTM:
                 self.outputText("Sync list found at destination.")
             else:
                 self.outputText("No sync list found; entire tree will be built.")
-            self.getNotebooks()
+            allnotebooks = self.getNotebooks()
+            if not self.noteBooks:
+                self.noteBooks = allnotebooks
             self.counter=self.refreshRate #doing this ensure a scan when the timer first fires
             self.firstscan=True
-            master.Bind(wx.EVT_TIMER, self.onTimer, master.timer)
-            master.timer.Start(1000, oneShot=True) #a one-shot timer is safer in case of exceptions
+            self.scan()
+#            master.Bind(wx.EVT_TIMER, self.onTimer, master.timer)
+#            master.timer.Start(1000, oneShot=True) #a one-shot timer is safer in case of exceptions
         else:
             master.Close(True)
 
@@ -164,7 +119,6 @@ class One2HTM:
         if self.counter>self.refreshRate:
             self.counter=0
             self.scan()
-            self.outputText("scan complete - resetting timer.")
         self.master.timer.Start(1000, oneShot=True)
 
     def DoConfig(self):
@@ -174,10 +128,21 @@ class One2HTM:
             self.rootFolder=config.get('Main','Destination')
             self.refreshRate=config.getint('Main','RefreshRateInSeconds')
             self.maxRecentItems=config.getint('Main','MaxRecentItems')
+            # Support a list of notebooks in the .ini file, syntax:
+            # notebooks =
+            #  one
+            #  two
+            #  three
+            #
+            # Must be a leading space, one notebook per line
+            try:
+                self.noteBooks=re.sub(r'^\n',r'',config.get('Main','NoteBooks')).split('\n')
+            except:
+                self.noteBooks=''
             return True
         else:
-            dirdialog=wx.DirDialog(self.master, 'Select destination folder for HTML files')
-            dirdialog.ShowModal()
+            #            dirdialog=wx.DirDialog(self.master, 'Select destination folder for HTML files')
+            #            dirdialog.ShowModal()
             self.rootFolder=dirdialog.GetPath()
             if self.rootFolder:
                 self.refreshRate=60
@@ -192,7 +157,12 @@ class One2HTM:
             
     def outputText(self, text):
         #convenience function for putting text in the memobox
-        self.master.memo.AppendText(text+'\n')        
+#        self.master.memo.AppendText(text+'\n')
+        try:
+            print text.encode('utf-8')+'\n'
+        except UnicodeEncodeError:
+            print "Couldn't print out text string because of unicode error\n"
+            
     def loadTimestamps(self):
         ##reads the last-modified timestamp for each file
         ##this is crucial for syncing just the updated pages
@@ -218,8 +188,11 @@ class One2HTM:
         root=ET.fromstring(basexmlstring.encode('utf-8'))
         notebooklist=[child for child in root if child.tag.endswith('Notebook')]
         self.outputText('Notebooks found: %s' % len(notebooklist))
+        nlist=[]
         for notebook in [child for child in root if child.tag.endswith('Notebook')]:
             self.outputText('--'+notebook.get('name'))
+            nlist.append(notebook.get('name'))
+        return nlist
     def setChangedFlag(self, node):
         ##check if the page has changed since we last synced
         nodeID=node.get('permanentID', default=node.get('ID')) #get the permanentID if it has one 
@@ -237,7 +210,7 @@ class One2HTM:
         ##generates the recently-changed-page list
         newpagelist='<br><h1>Recent pages</h1>\n'
         for page in self.recentpages.get(notebook.get('name'),[]):
-            newpagelist=newpagelist+'<div style="background: %(color)s" ><a class="divlink" href=pages/%(permanentID)s/index.htm>%(sectionname)s &raquo;<br> %(name)s</a></div>\n' % page
+            newpagelist=newpagelist+'<div style="background: %(color)s" ><a class="divlink" href=%(permanentID)s/index.htm>%(sectionname)s &raquo;<br> %(name)s</a></div>\n' % page
         return newpagelist 
 
     def addPageDate(self, page, notebook):
@@ -259,87 +232,89 @@ class One2HTM:
     ## Major functions here ##
     def scan(self):
         ## Iterate through the notebooks and identify changed pages to be exported ##
-        self.master.SetStatusText('Scanning...')     
+        #        self.master.SetStatusText('Scanning...')     
         basexmlstring=onapp.GetHierarchy("",4) #4 is the scope level for pages
         root=ET.fromstring(basexmlstring.encode('utf-8'))
         rootChanged=False #this has to be done manually because the root doesn't have a Last Modified. This variable is changed at the end of the loop.
         rootindex=RootIndex()
         for notebook in [child for child in root if child.tag.endswith('Notebook')]:
-            rootindex.add(notebook.attrib)
-            self.setChangedFlag(notebook)
-            if notebook.get('hasChanged') or self.firstscan: #let's look at the sections in this notebook
-                self.master.SetStatusText('Updating...')
-                notebookindex=NotebookIndex(notebook.attrib)
-                for child in notebook:
-                    child.set('subPath',re.sub(r'\.one$',r'.htm',re.sub(r'\\',r'...',child.get('path').replace(notebook.get('path'),'').lstrip(r'\\'))))
-                    child.set('subName',re.sub(r'/',r'&raquo;',child.get('subPath')))
-                    if child.tag.endswith('Section'):
-                        child.set('group','')
-                        notebookindex.add(child.attrib)
-                        self.scanSection(child, notebook)
-                    if child.tag.endswith('SectionGroup'):
-                        self.scanSectionGroup(child,notebook,notebookindex)
-                #find the most recently-updated pages
-                notebookindex.insertText(self.getNewPages(notebook))
-                notebookindex.writeFile(os.path.join(self.rootFolder, notebook.get('name'), 'index.htm'))
-                rootChanged=True
-        if rootChanged: #this means something, somewhere has changed. Update the root index and the timestamp list
-            rootindex.writeFile(os.path.join(self.rootFolder, 'index.htm')) #updating this index not really necessary but it doesn't hurt
-            self.saveTimestamps()
-        self.firstscan=False
-        self.master.SetStatusText("Scanning for changes every %s seconds" % self.refreshRate)
+            if (notebook.get('name') in self.noteBooks):
+                rootindex.add(notebook.attrib)
+                self.setChangedFlag(notebook)
+                if notebook.get('hasChanged') or self.firstscan: #let's look at the sections in this notebook
+#                   self.master.SetStatusText('Updating...')
+                    notebookindex=NotebookIndex(notebook.attrib)
+
+                    for child in notebook:
+                        self.scanObject('',child, notebook, notebookindex)
+
+                    #find the most recently-updated pages
+                    notebookindex.insertText(self.getNewPages(notebook))
+                    notebookindex.writeFile(os.path.join(self.rootFolder, notebook.get('name'), 'index.htm'))
+                    rootChanged=True
+            if rootChanged: #this means something, somewhere has changed. Update the root index and the timestamp list
+                rootindex.writeFile(os.path.join(self.rootFolder, 'index.htm')) #updating this index not really necessary but it doesn't hurt
+                self.saveTimestamps()
+            self.firstscan=False
+            #        self.master.SetStatusText("Scanning for changes every %s seconds" % self.refreshRate)
         return rootChanged
 
-    def scanSectionGroup(self, sectionGroup, notebook, notebookindex): #run through everything in this sectionGroup
-        #sectionGroup.set('subPath',sectionGroup.get('subPath').strip(r'\\') )
-        #pprint(sectionGroup.attrib)
-        for child in sectionGroup: 
-            child.set('subPath',re.sub(r'\.one$',r'.htm',re.sub(r'\\',r'...',child.get('path').replace(notebook.get('path'),'').lstrip(r'\\'))))
-            child.set('subName',re.sub(r'/',r'&raquo;',child.get('subPath')))
-            #self.outputText(':%s ' % child.get('name'))
-            if child.tag.endswith('SectionGroup'):
-                self.scanSectionGroup(child,notebook, notebookindex)
-            if child.tag.endswith('Section'):
-                child.set('group',child.get('name')+' &raquo; ')
-                notebookindex.add(child.attrib)
-                self.scanSection(child, notebook) 
+    def scanObject(self, prefix, sectionobject, notebook, notebookindex):
+        if (sectionobject.get('name') not in ignored_headings):   # Skip these sections
+            print sectionobject.tag + " >" + sectionobject.get('name') + "<"
+            if prefix: prefix + '=> '
+            sectionobject.set('group',prefix)
+            if sectionobject.tag.endswith('Section'):
+                    notebookindex.add(sectionobject.attrib)
+                    print "attrib:",sectionobject.attrib
+                    self.scanSection(prefix, sectionobject, notebook)
+            if sectionobject.tag.endswith('SectionGroup'):
+                for section in sectionobject:
+                    section.set('group',prefix + sectionobject.get('name') +'=> &raquo; ')
+                    self.scanObject(prefix + sectionobject.get('name') + '=> ', section, notebook, notebookindex)
 
-    def scanSection(self, section, notebook): #run through all the pages in this section
+    def scanSection(self, prefix, section, notebook): #run through all the pages in this section
         self.setChangedFlag(section) 
         if section.get('hasChanged') or self.firstscan:
             sectionindex=SectionIndex(section.attrib)
             for page in [child for child in section if child.tag.endswith('Page')]:
-                page.set('permanentID',self.getPermanentPageID(page.get('ID')))
-                page.set('color',section.get('color'))
-                page.set('sectionname',section.get('name'))
-                if page.get('isSubPage') or page.get('pageLevel')=='2':
-                    page.set('subpageString','class="subpage"')
-                else:
-                    page.set('subpageString','')
-                sectionindex.add(page.attrib)
-                self.setChangedFlag(page)
-                self.addPageDate(page, notebook)
-                if page.get('hasChanged'):
-                    self.outputText(notebook.get('name')+'\\'+section.get('name')+'\\'+page.get('name'))
-                    wx.Yield() #refresh the gui
-                    self.exportPage(notebook.get('name'), page)
-            sectionindex.writeFile(os.path.join(self.rootFolder, notebook.get('name'),  section.get('subPath')))
+                if (page.get('name') not in ignored_headings):   # Skip these sections
+                    page.set('permanentID',self.getPermanentPageID(page.get('ID')))
+                    page.set('color',section.get('color'))
+                    page.set('sectionname',prefix + '=>' + section.get('name'))
+                    page.set('group',prefix)
+                    if page.get('isSubPage') or page.get('pageLevel')=='2':
+                        page.set('subpageString','class="subpage"')
+                    else:
+                        page.set('subpageString','')
+                    sectionindex.add(page.attrib)
+                    self.setChangedFlag(page)
+                    self.addPageDate(page, notebook)
+                    if page.get('hasChanged'):
+                        self.outputText(notebook.get('name')+'\\'+section.get('name')+'\\'+page.get('name'))
+                        #                    wx.Yield() #refresh the gui
+                        self.exportPage(notebook.get('name'), page)
+            sectionindex.writeFile(os.path.join(self.rootFolder, notebook.get('name'), section.get('name')+'.htm'))
 
     def exportPage(self, notebookname, page):
         ## converts a onenote page into a set of HTML pages ##
         #first, some sub-functions
         def writeHTML(text):
-            pprint(page.attrib)
             ##this function saves the HTML file
             #insert custom CSS
             text=text.replace('<head>','<head><title>'+page.get('name').encode('utf-8')+'</title>'+customcss)
             #remove unnecessary left margins
             text=re.sub(r'margin-left:[-.\d]*in;','',text)
             #replaces onenote hyperlinks with ones to the correct web page
-            text=re.sub(r'href=.*section-id=([\w\{\}-]*)&amp;page-id=([\w\{\}-]*).*">',r'href="../../\2/index.htm">',text)
-            text=re.sub(r'href="onenote:([^#]+)\.one#.*">',r'href="../\1.htm">',text)
-            text=re.sub(r'href="onenote:([^#]+)#.*">',r'href="../\1.htm">',text)
-            text=re.sub(r'href="\.\.\/\.\.\/([^"]+)\\',r'href="../../\1...',text)
+            text=re.sub(r'href=.*section-id=([\w\{\}-]*)&amp;page-id=([\w\{\}-]*).*">',r'href="../\2/index.htm">',text)
+            #replaces onenote inserted files with local links to the copied files
+            rex=re.compile('&lt;&lt;(?P<file>[^;]*)&gt;&gt;')
+            files=re.finditer(rex,text)
+            for match in files:
+                # Handle annoying extra spaces \n's in filenames left by onapp.Publish()
+                #  Note that this will not produce correct links if a file has multiple spaces in the name ...
+                nonl=re.sub(r'[\n ]+',r' ',match.group('file'))  
+                text=re.sub(r'&lt;&lt;([^;]*)&gt;&gt;',r'<a class="divlink" href="'+nonl+'">'+nonl+';</div>',text,1)  # Fixup each attachment
             if not os.path.isdir(destinationfolder):
                 os.makedirs(destinationfolder)
             outfilename=os.path.join(destinationfolder,'index.htm')
@@ -354,13 +329,35 @@ class One2HTM:
             outfile=open(os.path.join(fulldir, filename),'wb')
             outfile.write(content)
             outfile.close()
-            
+        def copyInsertedFiles(page,destinationfolder):
+            # Pull out all of the attachments and copy them locally
+            xml = ET.fromstring(onapp.GetPageContent(page.get('ID'),'').encode('utf-8'))
+            for e in xml.iter():
+                if (e.tag.endswith('InsertedFile')):
+                    print 'Inserted File:', e.get('preferredName')," ",e.get('pathSource')
+                    try:
+                        targetfile=os.path.join(destinationfolder,e.get('preferredName'))
+                        if os.path.isfile(targetfile): # any existing file must be removed, otherwise an exception occurs
+                            os.remove(targetfile)
+                        shutil.copyfile(e.get('pathCache'),targetfile)
+                    except:
+                        path=e.get('pathCache')
+                        print "Couldn't copy file ",path.encode('utf-8')
+                        raise
+
         ##export the onenote page into a temporary MHT file
         mhtfilename=os.path.join(tempfile.gettempdir(), 'index.mht')
         if os.path.isfile(mhtfilename): # any existing file must be removed, otherwise an exception occurs
             os.remove(mhtfilename)
         onapp.Publish(page.get('ID'),mhtfilename,2,'') #this makes the MHT file
-        destinationfolder=os.path.join(self.rootFolder, notebookname, 'pages', page.get('permanentID'))
+        destinationfolder=os.path.join(self.rootFolder, notebookname, page.get('permanentID'))
+
+        if not os.path.isdir(destinationfolder):
+            os.makedirs(destinationfolder)
+        
+        # Grab any attachments now that the folder has been created
+        copyInsertedFiles(page,destinationfolder)
+
         #now convert the MHT file into HTML and write to the destination:        
         fp=open(mhtfilename)
         try:
@@ -384,10 +381,6 @@ class One2HTM:
             fp.close()
     ## End of the major functions ##
 
-
         
-app = wx.App()
-frame=MainWindow(None, "OneNote HTML Server")
-base=One2HTM(frame)
-app.MainLoop()
+base=One2HTM("foo")
 
